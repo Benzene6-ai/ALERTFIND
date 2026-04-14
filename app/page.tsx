@@ -61,14 +61,13 @@ export default function Home() {
     }
   }
 
-  async function handleRegister() {
+ async function handleRegister() {
   if (!agreeTerms || !agreeGdpr) {
     alert('Please agree to both terms to continue.');
     return;
   }
   setLoading(true);
- 
-  // 1. Create the auth user in Supabase
+
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
@@ -79,34 +78,28 @@ export default function Home() {
       },
     },
   });
- 
+
   if (error) {
     alert(error.message);
     setLoading(false);
     return;
   }
- 
-  // 2. Save extra profile data to the profiles table
+
+  // Now update the profile with the extra fields the trigger didn't have
   if (data.user) {
-    const { error: profileError } = await supabase
+    await supabase
       .from('profiles')
-      .insert({
-        id:             data.user.id,
-        first_name:     firstName,
-        last_name:      lastName,
+      .update({
         phone,
         country,
         city,
         quarter,
         alert_pref:     alertPref,
         alert_delivery: alertDelivery,
-      });
- 
-    if (profileError) {
-      console.error('Profile save error:', profileError.message);
-    }
+      })
+      .eq('id', data.user.id);
   }
- 
+
   setLoading(false);
   setSuccess(true);
 }
