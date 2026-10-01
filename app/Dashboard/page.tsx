@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase';
 
 type FilterType = 'all' | 'children' | 'adults' | 'elderly' | 'urgent';
 type ViewType   = 'grid' | 'list';
+type Lang       = 'en' | 'fr';
 
 interface Case {
   id: string;
@@ -31,14 +32,12 @@ interface Case {
 function hoursAgo(dateStr: string): number {
   return Math.floor((Date.now() - new Date(dateStr).getTime()) / (1000 * 60 * 60));
 }
-
 function timeAgo(dateStr: string): string {
   const h = hoursAgo(dateStr);
   if (h < 1)  return 'Just now';
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
 }
-
 function isUrgent(c: Case): boolean {
   return (
     c.case_type === 'Missing child' ||
@@ -46,11 +45,9 @@ function isUrgent(c: Case): boolean {
     hoursAgo(c.created_at) <= 12
   );
 }
-
 function getInitials(first: string, last: string): string {
   return `${first?.[0] ?? ''}${last?.[0] ?? ''}`.toUpperCase();
 }
-
 const COLORS = ['#E03030','#E07830','#1D9E75','#378ADD','#7F77DD','#D4537E','#0F6E56','#BA7517'];
 function getColor(id: string): string {
   let hash = 0;
@@ -58,28 +55,231 @@ function getColor(id: string): string {
   return COLORS[Math.abs(hash) % COLORS.length];
 }
 
-export default function Dashboard() {
-  const [cases,     setCases]     = useState<Case[]>([]);
-  const [loadingDB, setLoadingDB] = useState(true);
-  const [filter,    setFilter]    = useState<FilterType>('all');
-  const [view,      setView]      = useState<ViewType>('grid');
-  const [search,    setSearch]    = useState('');
-  const [selected,  setSelected]  = useState<Case | null>(null);
-  const [avatarOpen, setAvatarOpen] = useState(false);
-  const [menuOpen,  setMenuOpen]  = useState(false);
-  const [userName,  setUserName]  = useState('ME');
+// ─── Share message templates ───────────────────────────────────────────────
+function buildMessage(c: Case, lang: Lang): string {
+  const date = c.last_seen_date
+    ? new Date(c.last_seen_date).toLocaleDateString(lang === 'fr' ? 'fr-FR' : 'en-GB')
+    : '—';
+  const contact = c.reporter_phone
+    ? (lang === 'fr' ? `📞 Contactez: ${c.reporter_phone}` : `📞 Contact: ${c.reporter_phone}`)
+    : (lang === 'fr' ? '📞 Contactez les autorités immédiatement.' : '📞 Contact authorities immediately.');
+
+  if (lang === 'fr') return `🚨 ALERTE PERSONNE DISPARUE 🚨
+
+Nom: ${c.first_name} ${c.last_name}
+Âge: ${c.age ? `${c.age} ans` : 'Inconnu'}
+Genre: ${c.gender || 'Non précisé'}
+Vu(e) pour la dernière fois à: ${c.last_seen_location || 'Inconnu'}
+Date: ${date}
+Type: ${c.case_type || 'Disparition'}
+
+${c.description || ''}
+
+${contact}
+Réf. dossier: ${c.case_number}
+
+🙏 Merci de partager ce message. Chaque partage peut sauver une vie.`;
+
+  return `🚨 MISSING PERSON ALERT 🚨
+
+Name: ${c.first_name} ${c.last_name}
+Age: ${c.age ? `${c.age} years old` : 'Unknown'}
+Gender: ${c.gender || 'Not specified'}
+Last seen: ${c.last_seen_location || 'Unknown'}
+Date: ${date}
+Case type: ${c.case_type || 'Missing'}
+
+${c.description || ''}
+
+${contact}
+Case ref: ${c.case_number}
+
+🙏 Please share this message. Every share could save a life.`;
+}
+
+// ─── Share Modal ───────────────────────────────────────────────────────────
+function ShareModal({ c, onClose }: { c: Case; onClose: () => void }) {
+  const [lang, setLang]               = useState<Lang>('en');
+  const [copied, setCopied]           = useState(false);
+  const [photoSaved, setPhotoSaved]   = useState(false);
+  const [downloading, setDownloading] = useState(false);
+
+  const message        = buildMessage(c, lang);
+  const encodedMessage = encodeURIComponent(message);
+
+  async function downloadPhoto() {
+    if (!c.photo_url) return;
+    setDownloading(true);
+    try {
+      const res  = await fetch(c.photo_url);
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `missing-${c.first_name}-${c.last_name}.jpg`.toLowerCase().replace(/\s+/g, '-');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setPhotoSaved(true);
+    } catch (e) {
+      console.error('Download failed:', e);
+    }
+    setDownloading(false);
+  }
+
+  async function copyMessage() {
+    await navigator.clipboard.writeText(message);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  }
+
+  function shareWhatsApp() {
+    window.open(`https://wa.me/?text=${encodedMessage}`, '_blank');
+  }
+
+  function shareFacebook() {
+    // Facebook no longer supports pre-filled text via URL — copy first, user pastes
+    copyMessage();
+    window.open('https://www.facebook.com/', '_blank');
+  }
+
+  // Reset copied state when language changes
+  useEffect(() => { setCopied(false); }, [lang]);
+
+  return (
+    <div className="share-overlay" onClick={onClose}>
+      <div className="share-modal" onClick={e => e.stopPropagation()}>
+
+        {/* Header */}
+        <div className="share-header">
+          <span className="share-title">📢 Share This Case</span>
+          <button className="close-btn" onClick={onClose}>✕</button>
+        </div>
+
+        {/* Language picker */}
+        <div className="share-lang">
+          <span className="share-lang-label">Message language:</span>
+          <div className="lang-pills">
+            <button className={`lang-pill${lang === 'en' ? ' active' : ''}`} onClick={() => setLang('en')}>
+              🇬🇧 English
+            </button>
+            <button className={`lang-pill${lang === 'fr' ? ' active' : ''}`} onClick={() => setLang('fr')}>
+              🇫🇷 Français
+            </button>
+          </div>
+        </div>
+
+        {/* Message preview */}
+        <div className="share-preview">
+          <pre className="share-pre">{message}</pre>
+          <button className="share-copy-btn" onClick={copyMessage}>
+            {copied ? '✅ Copied!' : '📋 Copy message'}
+          </button>
+        </div>
+
+        {/* Step 1 — Download photo */}
+        {c.photo_url && (
+          <div className="share-step">
+            <div className="share-step-label">
+              <span className="step-num">1</span>
+              <span>{lang === 'fr' ? 'Téléchargez la photo' : 'Download the photo'}</span>
+            </div>
+            <div className="share-step-body">
+              <img src={c.photo_url} alt={`${c.first_name} ${c.last_name}`} className="share-thumb" />
+              <button
+                className={`share-dl-btn${photoSaved ? ' saved' : ''}`}
+                onClick={downloadPhoto}
+                disabled={downloading}
+              >
+                {downloading ? '⏳ Saving...' : photoSaved ? '✅ Photo saved!' : '⬇️ Download Photo'}
+              </button>
+            </div>
+            {photoSaved && (
+              <p className="share-hint">
+                {lang === 'fr'
+                  ? 'Photo enregistrée. Joignez-la à votre publication.'
+                  : 'Photo saved to your device. Attach it when you post.'}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Step 2 — Share */}
+        <div className="share-step">
+          <div className="share-step-label">
+            <span className="step-num">{c.photo_url ? '2' : '1'}</span>
+            <span>{lang === 'fr' ? 'Partagez le message' : 'Share the message'}</span>
+          </div>
+          <div className="share-platforms">
+            <button className="share-wa" onClick={shareWhatsApp}>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/>
+                <path d="M12 0C5.373 0 0 5.373 0 12c0 2.127.558 4.123 1.532 5.859L.057 23.428a.75.75 0 00.916.916l5.569-1.475A11.943 11.943 0 0012 24c6.627 0 12-5.373 12-12S18.627 0 12 0zm0 22c-1.9 0-3.7-.498-5.27-1.453l-.378-.223-3.927 1.04 1.04-3.927-.223-.378A9.953 9.953 0 012 12C2 6.477 6.477 2 12 2s10 4.477 10 10-4.477 10-10 10z"/>
+              </svg>
+              WhatsApp
+            </button>
+            <button className="share-fb" onClick={shareFacebook}>
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+              </svg>
+              Facebook
+            </button>
+          </div>
+          {lang === 'fr'
+            ? <p className="share-fb-note">💡 Pour Facebook: le message est copié automatiquement. Collez-le dans votre publication et joignez la photo.</p>
+            : <p className="share-fb-note">💡 For Facebook: the message is auto-copied. Paste it in your post and attach the downloaded photo.</p>
+          }
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+function JoinGroupButton({ caseId }: { caseId: string }) {
+  const [groupId, setGroupId] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchCases();
-    fetchUser();
-  }, []);
+    supabase
+      .from('case_groups')
+      .select('id')
+      .eq('case_id', caseId)
+      .single()
+      .then(({ data }) => setGroupId(data?.id ?? null));
+  }, [caseId]);
+
+  if (!groupId) return (
+    <button className="btn-outline" disabled>💬 Join Case Group</button>
+  );
+
+  return (
+    <a href={`/cases/${groupId}`} className="btn-outline"
+      style={{ textDecoration:'none', display:'flex', alignItems:'center', justifyContent:'center', gap:'8px' }}>
+      💬 Join Case Group
+    </a>
+  );
+}
+
+// ─── Main Dashboard ────────────────────────────────────────────────────────
+export default function Dashboard() {
+  const [cases,      setCases]      = useState<Case[]>([]);
+  const [loadingDB,  setLoadingDB]  = useState(true);
+  const [filter,     setFilter]     = useState<FilterType>('all');
+  const [view,       setView]       = useState<ViewType>('grid');
+  const [search,     setSearch]     = useState('');
+  const [selected,   setSelected]   = useState<Case | null>(null);
+  const [sharing,    setSharing]    = useState(false);        // ← new
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const [menuOpen,   setMenuOpen]   = useState(false);
+  const [userName,   setUserName]   = useState('ME');
+
+  useEffect(() => { fetchCases(); fetchUser(); }, []);
 
   async function fetchCases() {
     setLoadingDB(true);
     const { data, error } = await supabase
-      .from('reports')
-      .select('*')
-      .eq('status', 'active')
+      .from('reports').select('*').eq('status', 'active')
       .order('created_at', { ascending: false });
     if (error) console.error('Fetch error:', error.message);
     else setCases(data ?? []);
@@ -90,10 +290,7 @@ export default function Dashboard() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
     const { data: profile } = await supabase
-      .from('profiles')
-      .select('first_name, last_name')
-      .eq('id', user.id)
-      .single();
+      .from('profiles').select('first_name, last_name').eq('id', user.id).single();
     if (profile) {
       setUserName(
         `${profile.first_name?.[0] ?? ''}${profile.last_name?.[0] ?? ''}`.toUpperCase() || 'ME'
@@ -139,11 +336,11 @@ export default function Dashboard() {
           --muted:#7A6E68;--soft:#B5A89F;--white:#F5F0EC;--success:#2ECC71;
         }
         html,body{min-height:100%;background:var(--ink);color:var(--white);overflow-x:hidden}
-
         @keyframes breathe{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.15);opacity:.7}}
         @keyframes ping{0%{transform:scale(1);opacity:.4}100%{transform:scale(1.8);opacity:0}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
         @keyframes slideRight{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}
+        @keyframes slideUp{from{opacity:0;transform:translateY(40px)}to{opacity:1;transform:translateY(0)}}
         @keyframes pulseRing{0%{box-shadow:0 0 0 0 rgba(224,48,48,.5)}70%{box-shadow:0 0 0 8px rgba(224,48,48,0)}100%{box-shadow:0 0 0 0 rgba(224,48,48,0)}}
         @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 
@@ -249,7 +446,6 @@ export default function Dashboard() {
 
         .loading-wrap{display:flex;align-items:center;justify-content:center;padding:4rem;gap:1rem;color:var(--muted);font-size:.88rem}
         .spinner{width:24px;height:24px;border:2px solid var(--line);border-top-color:var(--red);border-radius:50%;animation:spin .8s linear infinite}
-
         .empty{text-align:center;padding:4rem 2rem;color:var(--muted);font-size:.88rem}
         .empty-icon{font-size:2.5rem;margin-bottom:1rem}
         .empty h3{font-family:'Syne',sans-serif;font-size:1.1rem;font-weight:700;color:var(--soft);margin-bottom:.5rem}
@@ -259,7 +455,7 @@ export default function Dashboard() {
         .detail-panel{width:100%;max-width:420px;height:100%;background:var(--surface);border-left:1px solid var(--line);overflow-y:auto;animation:slideRight .3s ease;display:flex;flex-direction:column}
         .detail-header{padding:1.25rem 1.5rem;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:var(--surface);z-index:10}
         .detail-header h3{font-family:'Syne',sans-serif;font-size:1rem;font-weight:700;color:var(--white)}
-        .close-btn{width:32px;height:32px;border-radius:8px;background:var(--card);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;transition:all .2s}
+        .close-btn{width:32px;height:32px;border-radius:8px;background:var(--card);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:1rem;transition:all .2s;color:var(--white)}
         .close-btn:hover{border-color:var(--red)}
         .detail-body{padding:1.5rem;flex:1}
         .detail-avatar-wrap{display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem}
@@ -282,6 +478,38 @@ export default function Dashboard() {
 
         .fab{position:fixed;bottom:2rem;right:2rem;z-index:90;padding:14px 22px;background:var(--red);color:white;border:none;border-radius:14px;font-family:'Syne',sans-serif;font-size:.9rem;font-weight:700;letter-spacing:.03em;cursor:pointer;transition:all .2s;box-shadow:0 4px 24px var(--red-glow);display:flex;align-items:center;gap:8px;text-decoration:none}
         .fab:hover{background:#C42828;transform:translateY(-2px);box-shadow:0 8px 32px var(--red-glow)}
+
+        /* ── Share modal ── */
+        .share-overlay{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.75);backdrop-filter:blur(6px);display:flex;align-items:flex-end;justify-content:center;padding:0}
+        @media(min-width:600px){.share-overlay{align-items:center;padding:1rem}}
+        .share-modal{background:var(--card);border:1px solid var(--line);border-radius:20px 20px 0 0;width:100%;max-width:480px;max-height:90vh;overflow-y:auto;animation:slideUp .28s ease;display:flex;flex-direction:column;gap:1rem;padding:1.25rem}
+        @media(min-width:600px){.share-modal{border-radius:20px}}
+        .share-header{display:flex;align-items:center;justify-content:space-between}
+        .share-title{font-family:'Syne',sans-serif;font-size:1rem;font-weight:700;color:var(--white)}
+        .share-lang{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap}
+        .share-lang-label{font-size:.78rem;color:var(--muted)}
+        .lang-pills{display:flex;gap:6px}
+        .lang-pill{padding:5px 14px;border-radius:20px;border:1.5px solid var(--line);background:var(--surface);color:var(--muted);font-size:.78rem;font-weight:600;cursor:pointer;transition:all .2s}
+        .lang-pill.active{background:var(--red-dim);border-color:var(--red);color:var(--white)}
+        .share-preview{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1rem}
+        .share-pre{font-family:'Instrument Sans',sans-serif;font-size:.78rem;line-height:1.65;white-space:pre-wrap;color:var(--soft);margin-bottom:.75rem}
+        .share-copy-btn{width:100%;padding:8px;background:var(--card);border:1.5px solid var(--line);border-radius:8px;font-size:.8rem;font-weight:600;color:var(--soft);cursor:pointer;transition:all .2s}
+        .share-copy-btn:hover{border-color:var(--muted);color:var(--white)}
+        .share-step{display:flex;flex-direction:column;gap:.6rem}
+        .share-step-label{display:flex;align-items:center;gap:8px;font-size:.88rem;font-weight:600;color:var(--white)}
+        .step-num{width:22px;height:22px;border-radius:50%;background:var(--red);color:white;font-size:.7rem;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+        .share-step-body{display:flex;align-items:center;gap:.75rem}
+        .share-thumb{width:64px;height:64px;object-fit:cover;border-radius:10px;border:1px solid var(--line);flex-shrink:0}
+        .share-dl-btn{flex:1;padding:10px;background:var(--surface);border:1.5px solid var(--line);border-radius:10px;font-size:.82rem;font-weight:600;color:var(--soft);cursor:pointer;transition:all .2s}
+        .share-dl-btn:hover{border-color:var(--muted);color:var(--white)}
+        .share-dl-btn.saved{border-color:#2ECC71;color:#2ECC71}
+        .share-hint{font-size:.75rem;color:#2ECC71}
+        .share-platforms{display:flex;flex-direction:column;gap:.5rem}
+        .share-wa,.share-fb{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border:none;border-radius:11px;font-family:'Syne',sans-serif;font-size:.88rem;font-weight:700;cursor:pointer;transition:opacity .2s}
+        .share-wa{background:#25D366;color:white}
+        .share-fb{background:#1877F2;color:white}
+        .share-wa:hover,.share-fb:hover{opacity:.88}
+        .share-fb-note{font-size:.73rem;color:var(--muted);line-height:1.5}
       `}</style>
 
       <div className="bg"><div className="bg-grid" /></div>
@@ -305,8 +533,8 @@ export default function Dashboard() {
               <div className="avatar" onClick={() => setAvatarOpen(o => !o)}>{userName}</div>
               {avatarOpen && (
                 <div className="avatar-menu">
-                  <a href="/profile" className="avatar-item">⚙️ Settings</a>
-                  <a href="/rewards" className="avatar-item">🏅 My Rewards</a>
+                  <a href="/profile"  className="avatar-item">⚙️ Settings</a>
+                  <a href="/rewards"  className="avatar-item">🏅 My Rewards</a>
                   <div className="avatar-item danger" onClick={handleSignOut}>🚪 Sign Out</div>
                 </div>
               )}
@@ -332,14 +560,12 @@ export default function Dashboard() {
           <a href="/evidence" className="nav-item"><span className="nav-icon">📸</span> Evidence Capture</a>
           <hr className="sidebar-sep" />
           <div className="sidebar-section">Account</div>
-          <a href="/rewards" className="nav-item"><span className="nav-icon">🏅</span> My Rewards</a>
+          <a href="/rewards"  className="nav-item"><span className="nav-icon">🏅</span> My Rewards</a>
           <a href="/profile"  className="nav-item"><span className="nav-icon">⚙️</span> Settings</a>
         </aside>
 
         {/* MAIN */}
         <main className="main">
-
-          {/* STATS */}
           <div className="stats-row">
             <div className="stat-card">
               <div className="stat-label">Active Cases</div>
@@ -363,7 +589,6 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* TOOLBAR */}
           <div className="toolbar">
             <div className="search-wrap">
               <span className="search-icon">🔍</span>
@@ -391,42 +616,34 @@ export default function Dashboard() {
             </div>
           </div>
 
-          {/* SECTION HEADER */}
           <div className="section-header">
             <span className="section-title">
-              {filter === 'all'      ? 'All Active Cases'   :
-               filter === 'urgent'   ? '🔴 Urgent Cases'    :
-               filter === 'children' ? 'Missing Children'   :
-               filter === 'elderly'  ? 'Missing Elderly'    : 'Missing Adults'}
+              {filter === 'all'      ? 'All Active Cases'  :
+               filter === 'urgent'   ? '🔴 Urgent Cases'   :
+               filter === 'children' ? 'Missing Children'  :
+               filter === 'elderly'  ? 'Missing Elderly'   : 'Missing Adults'}
             </span>
             <span className="section-count">{filtered.length} case{filtered.length !== 1 ? 's' : ''}</span>
           </div>
 
-          {/* CASES */}
           {loadingDB ? (
-            <div className="loading-wrap">
-              <div className="spinner" /> Loading cases...
-            </div>
+            <div className="loading-wrap"><div className="spinner" /> Loading cases...</div>
           ) : filtered.length === 0 ? (
             <div className="empty">
               <div className="empty-icon">{cases.length === 0 ? '📋' : '🔍'}</div>
               <h3>{cases.length === 0 ? 'No cases reported yet' : 'No cases match your search'}</h3>
-              <p>
-                {cases.length === 0
-                  ? <><a href="/report">Be the first to file a report →</a></>
-                  : 'Try adjusting your search or filter.'}
-              </p>
+              <p>{cases.length === 0 ? <><a href="/report">Be the first to file a report →</a></> : 'Try adjusting your search or filter.'}</p>
             </div>
           ) : view === 'grid' ? (
             <div className="cases-grid">
               {filtered.map(c => {
-                const urgent   = isUrgent(c);
-                const color    = getColor(c.id);
-                const initials = getInitials(c.first_name, c.last_name);
+                const urgent = isUrgent(c);
+                const color  = getColor(c.id);
+                const inits  = getInitials(c.first_name, c.last_name);
                 return (
                   <div key={c.id} className={`case-card${urgent ? ' urgent' : ''}`} onClick={() => setSelected(c)}>
                     <div className="card-top">
-                      <div className="case-avatar" style={{ background: color }}>{initials}</div>
+                      <div className="case-avatar" style={{ background: color }}>{inits}</div>
                       <div className="card-info">
                         <div className="case-name">{c.first_name} {c.last_name}</div>
                         <div className="case-meta">{c.age ? `${c.age} yrs` : 'Age unknown'} · {c.gender || 'Unknown'}</div>
@@ -434,25 +651,11 @@ export default function Dashboard() {
                       {urgent && <span className="urgent-tag">Urgent</span>}
                     </div>
                     <div className="case-type-tag">{c.case_type || 'Missing'}</div>
-                    {c.last_seen_location && (
-                      <div className="case-detail-row">
-                        <span className="detail-icon-sm">📍</span>
-                        <span>{c.last_seen_location}</span>
-                      </div>
-                    )}
-                    {c.clothing && (
-                      <div className="case-detail-row">
-                        <span className="detail-icon-sm">👕</span>
-                        <span>{c.clothing}</span>
-                      </div>
-                    )}
+                    {c.last_seen_location && <div className="case-detail-row"><span className="detail-icon-sm">📍</span><span>{c.last_seen_location}</span></div>}
+                    {c.clothing           && <div className="case-detail-row"><span className="detail-icon-sm">👕</span><span>{c.clothing}</span></div>}
                     <div className="card-footer">
-                      <div className={`time-badge${hoursAgo(c.created_at) <= 12 ? ' recent' : ''}`}>
-                        {timeAgo(c.created_at)}
-                      </div>
-                      <button className="card-action" onClick={e => { e.stopPropagation(); setSelected(c); }}>
-                        View →
-                      </button>
+                      <div className={`time-badge${hoursAgo(c.created_at) <= 12 ? ' recent' : ''}`}>{timeAgo(c.created_at)}</div>
+                      <button className="card-action" onClick={e => { e.stopPropagation(); setSelected(c); }}>View →</button>
                     </div>
                   </div>
                 );
@@ -461,34 +664,28 @@ export default function Dashboard() {
           ) : (
             <div className="cases-list">
               {filtered.map(c => {
-                const urgent   = isUrgent(c);
-                const color    = getColor(c.id);
-                const initials = getInitials(c.first_name, c.last_name);
+                const urgent = isUrgent(c);
+                const color  = getColor(c.id);
+                const inits  = getInitials(c.first_name, c.last_name);
                 return (
                   <div key={c.id} className={`list-row${urgent ? ' urgent' : ''}`} onClick={() => setSelected(c)}>
-                    <div className="list-avatar" style={{ background: color }}>{initials}</div>
+                    <div className="list-avatar" style={{ background: color }}>{inits}</div>
                     <div className="list-info">
                       <div className="list-name">{c.first_name} {c.last_name}</div>
-                      <div className="list-sub">
-                        {c.age ? `${c.age} yrs · ` : ''}{c.case_type || 'Missing'} · {c.last_seen_location || 'Location unknown'}
-                      </div>
+                      <div className="list-sub">{c.age ? `${c.age} yrs · ` : ''}{c.case_type || 'Missing'} · {c.last_seen_location || 'Location unknown'}</div>
                     </div>
                     {urgent && <span className="urgent-tag">Urgent</span>}
                     <div className="list-right">
-                      <div className={`list-time${hoursAgo(c.created_at) <= 12 ? ' recent' : ''}`}>
-                        {timeAgo(c.created_at)}
-                      </div>
+                      <div className={`list-time${hoursAgo(c.created_at) <= 12 ? ' recent' : ''}`}>{timeAgo(c.created_at)}</div>
                     </div>
                   </div>
                 );
               })}
             </div>
           )}
-
         </main>
       </div>
 
-      {/* FLOATING BUTTON */}
       <a href="/report" className="fab">+ Report Missing Person</a>
 
       {/* DETAIL PANEL */}
@@ -500,6 +697,13 @@ export default function Dashboard() {
               <button className="close-btn" onClick={() => setSelected(null)}>✕</button>
             </div>
             <div className="detail-body">
+              {selected.photo_url && (
+                <img
+                  src={selected.photo_url}
+                  alt={`${selected.first_name} ${selected.last_name}`}
+                  style={{ width:'100%', height:'200px', objectFit:'cover', borderRadius:'12px', marginBottom:'1.25rem', border:'1px solid var(--line)' }}
+                />
+              )}
               <div className="detail-avatar-wrap">
                 <div className="detail-avatar" style={{ background: getColor(selected.id) }}>
                   {getInitials(selected.first_name, selected.last_name)}
@@ -507,9 +711,7 @@ export default function Dashboard() {
                 <div>
                   <div className="detail-name">{selected.first_name} {selected.last_name}</div>
                   <div className="detail-id">{selected.case_number}</div>
-                  {isUrgent(selected) && (
-                    <span className="urgent-tag" style={{ marginTop:'6px', display:'inline-block' }}>Urgent</span>
-                  )}
+                  {isUrgent(selected) && <span className="urgent-tag" style={{ marginTop:'6px', display:'inline-block' }}>Urgent</span>}
                 </div>
               </div>
 
@@ -521,9 +723,7 @@ export default function Dashboard() {
                 {selected.eye_color  && <div className="detail-row"><span className="dk">Eyes</span><span className="dv">{selected.eye_color}</span></div>}
                 {selected.clothing   && <div className="detail-row"><span className="dk">Clothing</span><span className="dv">{selected.clothing}</span></div>}
               </div>
-
               <hr className="detail-sep" />
-
               <div className="detail-sec">
                 <div className="detail-sec-title">Disappearance</div>
                 {selected.case_type          && <div className="detail-row"><span className="dk">Case Type</span><span className="dv">{selected.case_type}</span></div>}
@@ -532,9 +732,7 @@ export default function Dashboard() {
                 {selected.description        && <div className="detail-row"><span className="dk">Description</span><span className="dv">{selected.description}</span></div>}
                 <div className="detail-row"><span className="dk">Reported</span><span className="dv">{timeAgo(selected.created_at)}</span></div>
               </div>
-
               <hr className="detail-sep" />
-
               <div className="detail-sec">
                 <div className="detail-sec-title">Reporter Contact</div>
                 {selected.reporter_name  && <div className="detail-row"><span className="dk">Name</span><span className="dv">{selected.reporter_name}</span></div>}
@@ -542,13 +740,21 @@ export default function Dashboard() {
               </div>
             </div>
 
+            {/* ── ACTIONS — share button now opens the modal ── */}
             <div className="detail-actions">
-              <button className="btn-primary">📢 Share This Case</button>
-              <button className="btn-outline">💬 Join Case Group</button>
+              <button className="btn-primary" onClick={() => setSharing(true)}>
+                📢 Share This Case
+              </button>
+              <JoinGroupButton caseId={selected.id} />
               <button className="btn-secondary">📸 Submit Evidence</button>
             </div>
           </div>
         </div>
+      )}
+
+      {/* SHARE MODAL — rendered on top of everything */}
+      {sharing && selected && (
+        <ShareModal c={selected} onClose={() => setSharing(false)} />
       )}
     </main>
   );

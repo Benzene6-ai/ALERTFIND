@@ -20,6 +20,7 @@ interface FormData {
 }
 
 export default function ReportPage() {
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [step, setStep]       = useState<ReportStep>(1);
   const [success, setSuccess] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -48,16 +49,24 @@ export default function ReportPage() {
   }
 
   function handlePhoto(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => set('photoPreview', ev.target?.result as string);
-    reader.readAsDataURL(file);
-  }
+  const file = e.target.files?.[0];
+  if (!file) return;
+
+  // Save the raw file for uploading
+  setPhotoFile(file);
+
+  // Save the preview for displaying
+  const reader = new FileReader();
+  reader.onload = ev => set('photoPreview', ev.target?.result as string);
+  reader.readAsDataURL(file);
+}
 
   function next() {
     if (step === 1 && (!form.firstName || !form.lastName || !form.age)) {
       alert('Please fill in first name, last name and age.'); return;
+    }
+    if (step === 1 && !form.photoPreview) {
+    alert('Please upload a photo of the missing person.'); return;
     }
     if (step === 2 && (!form.lastDate || !form.location)) {
       alert('Please fill in date last seen and location.'); return;
@@ -76,19 +85,49 @@ export default function ReportPage() {
 
   async function submit() {
   setLoading(true);
- 
-  // Generate a unique case number
+
   const caseNumber = 'AF-' + new Date().getFullYear() + '-' + Math.floor(1000 + Math.random() * 9000);
- 
-  // Get the currently logged-in user
   const { data: { user } } = await supabase.auth.getUser();
- 
-  // Save the report to Supabase
+  if (!user) {
+  alert('You must be logged in to submit a report.');
+  setLoading(false);
+  return;
+}
+
+  // Upload photo if one was selected
+  let photoUrl: string | null = null;
+
+  if (photoFile) {
+    const fileExt  = photoFile.name.split('.').pop();
+    const fileName = `${caseNumber}-${Date.now()}.${fileExt}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('reports')          // ← replace with your bucket name if different
+      .upload(fileName, photoFile, {
+        cacheControl: '3600',
+        upsert: false,
+      });
+
+    if (uploadError) {
+      alert('Photo upload failed: ' + uploadError.message);
+      setLoading(false);
+      return;
+    }
+
+    // Get the public URL
+    const { data: urlData } = supabase.storage
+      .from('reports')          // ← same bucket name here
+      .getPublicUrl(fileName);
+
+    photoUrl = urlData.publicUrl;
+  }
+
+  // Save the report with the photo URL
   const { error } = await supabase
     .from('reports')
     .insert({
       case_number:        caseNumber,
-      reporter_id:        user?.id ?? null,
+      reporter_id:        user.id,
       first_name:         form.firstName,
       last_name:          form.lastName,
       age:                form.age ? parseInt(form.age) : null,
@@ -101,6 +140,7 @@ export default function ReportPage() {
       eye_color:          form.eyes,
       clothing:           form.clothing,
       features:           form.features,
+      photo_url:          photoUrl,        // ← now saved
       last_seen_date:     form.lastDate || null,
       last_seen_time:     form.lastTime || null,
       last_seen_location: form.location,
@@ -117,13 +157,13 @@ export default function ReportPage() {
       notes:              form.notes,
       status:             'active',
     });
- 
+
   if (error) {
     alert('Error submitting report: ' + error.message);
     setLoading(false);
     return;
   }
- 
+
   setCaseId(caseNumber);
   setLoading(false);
   setSuccess(true);
@@ -483,6 +523,7 @@ export default function ReportPage() {
                 >
                   Submit Another Report
                 </button>
+                <a href="/dashboard" className="btn-submit">Back to Dashboard</a>
               </div>
             </div>
           ) : (
@@ -585,7 +626,7 @@ export default function ReportPage() {
                       </div>
                       <hr className="sep" />
                       <div className="field span2">
-                        <label>Photo of Missing Person</label>
+                        <label>Photo of Missing Person <span className="req">*</span></label>
                         <div className="upload-zone" onClick={() => fileRef.current?.click()}>
                           <input
                             ref={fileRef} type="file" accept="image/*" onChange={handlePhoto}

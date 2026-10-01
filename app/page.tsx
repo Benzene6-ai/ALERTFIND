@@ -1,7 +1,6 @@
 'use client';
 
 import { useState } from 'react';
-import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 
 type Tab = 'register' | 'login';
@@ -123,7 +122,7 @@ export default function Home() {
   }
  
   // Redirect to dashboard after successful login
-  window.location.href = '/Dashboard';
+  window.location.href = '/dashboard';
 }
 
   return (
@@ -479,13 +478,6 @@ export default function Home() {
       </div>
 
       <div className="page">
-        <Link href="/report" className="report-btn">
-        Make a Signalement
-      </Link>
-
-        <Link href="/Dashboard" className="report-btn secondary">
-        Dashboard public
-      </Link>
 
         {/* LEFT PANEL */}
         <div className="left-panel">
