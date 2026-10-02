@@ -11,7 +11,7 @@ interface Message {
 }
 interface Member {
   id: string; user_id: string; role: string; is_blocked: boolean;
-  joined_at: string; profile?: Profile;
+  joined_at: string; profile?: Profile | Profile[];
 }
 interface CaseGroup {
   id: string; case_id: string; created_by: string;
@@ -40,6 +40,12 @@ function formatDate(d: string) {
   return date.toLocaleDateString([], { day:'numeric', month:'short', year:'numeric' });
 }
 
+// ── Helper: profile is sometimes an array, sometimes an object ──
+function getProfile(member: Member): Profile | undefined {
+  if (!member.profile) return undefined;
+  return Array.isArray(member.profile) ? member.profile[0] : member.profile;
+}
+
 export default function CaseGroupPage() {
   const { id } = useParams<{ id: string }>();
   const [group,        setGroup]        = useState<CaseGroup | null>(null);
@@ -56,22 +62,19 @@ export default function CaseGroupPage() {
   const [rewardMsg,    setRewardMsg]    = useState('');
   const [rewardPts,    setRewardPts]    = useState('50');
   const [solving,      setSolving]      = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
-  const fileRef   = useRef<HTMLInputElement>(null);
+  const bottomRef  = useRef<HTMLDivElement>(null);
+  const fileRef    = useRef<HTMLInputElement>(null);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // ── FIX 2: single channel, subscribe once, never re-subscribe ──
   const setupRealtime = useCallback(() => {
-    // Remove any existing channel first
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
     }
-
     const channel = supabase
       .channel(`group-messages-${id}`)
       .on(
@@ -80,7 +83,7 @@ export default function CaseGroupPage() {
         async (payload) => {
           const { data } = await supabase
             .from('group_messages')
-            .select('*, sender:profiles(id,first_name,last_name,avatar_url)')
+            .select('*, sender:profiles(id,first_name,last_name)')
             .eq('id', payload.new.id)
             .single();
           if (data) setMessages(prev => [...prev, data]);
@@ -96,11 +99,9 @@ export default function CaseGroupPage() {
         }
       )
       .subscribe();
-
     channelRef.current = channel;
   }, [id]);
 
-  // ── FIX 3: fetch members with explicit foreign key hint ──
   const fetchMembers = useCallback(async () => {
     const { data, error } = await supabase
       .from('group_members')
@@ -110,13 +111,13 @@ export default function CaseGroupPage() {
       `)
       .eq('group_id', id);
     if (error) console.error('fetchMembers error:', error.message);
-    setMembers(data ?? []);
+    setMembers((data ?? []) as Member[]);
   }, [id]);
 
   const fetchMessages = useCallback(async () => {
     const { data, error } = await supabase
       .from('group_messages')
-     .select('*, sender:profiles(id,first_name,last_name)')
+      .select('*, sender:profiles(id,first_name,last_name)')
       .eq('group_id', id)
       .order('created_at', { ascending: true });
     if (error) console.error('fetchMessages error:', error.message);
@@ -127,43 +128,31 @@ export default function CaseGroupPage() {
     let cancelled = false;
 
     async function init() {
-      // 1. Get current user
       const { data: { user } } = await supabase.auth.getUser();
       if (!user || cancelled) return;
 
-      // 2. Get profile
       const { data: profile } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', user.id)
-        .single();
+        .from('profiles').select('*').eq('id', user.id).single();
       if (cancelled) return;
       setMe(profile);
 
-      // 3. Get group + case info
       const { data: grp } = await supabase
         .from('case_groups')
         .select('*, report:reports(first_name,last_name,case_number,status,photo_url,case_type,last_seen_location,reporter_id)')
-        .eq('id', id)
-        .single();
+        .eq('id', id).single();
       if (cancelled) return;
       setGroup(grp);
 
-      // 4. Check / create membership
       const { data: membership } = await supabase
         .from('group_members')
         .select('role, is_blocked')
         .eq('group_id', id)
         .eq('user_id', user.id)
-        .maybeSingle(); // ← maybeSingle so missing row = null, not error
-
+        .maybeSingle();
       if (cancelled) return;
 
       if (!membership) {
-        // Auto-join
-        await supabase.from('group_members').insert({
-          group_id: id, user_id: user.id, role: 'member'
-        });
+        await supabase.from('group_members').insert({ group_id: id, user_id: user.id, role: 'member' });
         await supabase.from('group_messages').insert({
           group_id: id, sender_id: user.id,
           content: `${profile?.first_name} ${profile?.last_name} joined the group.`,
@@ -174,12 +163,10 @@ export default function CaseGroupPage() {
         setMyRole('none');
         return;
       } else {
-        // Upgrade reporter to admin if needed
         if (grp?.report?.reporter_id === user.id && membership.role !== 'admin') {
           await supabase.from('group_members')
             .update({ role: 'admin' })
-            .eq('group_id', id)
-            .eq('user_id', user.id);
+            .eq('group_id', id).eq('user_id', user.id);
           setMyRole('admin');
         } else {
           setMyRole(membership.role as 'admin' | 'member');
@@ -187,8 +174,6 @@ export default function CaseGroupPage() {
       }
 
       if (cancelled) return;
-
-      // 5. Load data then subscribe — FIX 2: subscribe only once here
       await fetchMessages();
       await fetchMembers();
       setupRealtime();
@@ -208,7 +193,6 @@ export default function CaseGroupPage() {
   async function sendMessage() {
     if (!me || (!text.trim() && !imgFile)) return;
     setSending(true);
-
     let imageUrl: string | null = null;
     if (imgFile) {
       const ext  = imgFile.name.split('.').pop();
@@ -219,14 +203,11 @@ export default function CaseGroupPage() {
         imageUrl = data.publicUrl;
       }
     }
-
     await supabase.from('group_messages').insert({
       group_id: id, sender_id: me.id,
-      content: text.trim(),
-      image_url: imageUrl,
+      content: text.trim(), image_url: imageUrl,
       message_type: imgFile ? 'image' : 'text',
     });
-
     setText(''); setImgFile(null); setImgPrev('');
     setSending(false);
   }
@@ -238,8 +219,7 @@ export default function CaseGroupPage() {
   async function blockUser(_memberId: string, userId: string) {
     await supabase.from('group_members')
       .update({ is_blocked: true })
-      .eq('group_id', id)
-      .eq('user_id', userId);
+      .eq('group_id', id).eq('user_id', userId);
     await supabase.from('group_messages').insert({
       group_id: id, sender_id: me!.id,
       content: 'A member has been removed from this group by the admin.',
@@ -251,7 +231,8 @@ export default function CaseGroupPage() {
   async function giveReward() {
     if (!rewardTarget || !me) return;
     setSolving(true);
-    const autoMsg = `🏆 Thank you ${rewardTarget.profile?.first_name} for your valuable contribution to case ${group?.report?.case_number}. Your help made a real difference. — ${me.first_name} ${me.last_name} (Case Admin)`;
+    const p = getProfile(rewardTarget);
+    const autoMsg = `🏆 Thank you ${p?.first_name} for your valuable contribution to case ${group?.report?.case_number}. Your help made a real difference. — ${me.first_name} ${me.last_name} (Case Admin)`;
     const finalMsg = rewardMsg.trim() || autoMsg;
     await supabase.from('rewards').insert({
       group_id: id, case_id: group?.case_id,
@@ -296,10 +277,9 @@ export default function CaseGroupPage() {
   const isSolved = group?.report?.status === 'solved';
   const activeMembers = members.filter(m => !m.is_blocked);
 
-  // ── Loading state while init runs ──
   if (myRole === null) {
     return (
-      <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--muted)',fontFamily:"'Instrument Sans',sans-serif",gap:'1rem'}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'var(--muted)',fontFamily:"'Instrument Sans',sans-serif",gap:'1rem',background:'#0D0B0A'}}>
         <div style={{width:'24px',height:'24px',border:'2px solid #2C2825',borderTopColor:'#E03030',borderRadius:'50%',animation:'spin .8s linear infinite'}}/>
         Loading group...
       </div>
@@ -315,7 +295,7 @@ export default function CaseGroupPage() {
         html,body{min-height:100%;background:var(--ink);color:var(--white);overflow:hidden}
         @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
         @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-       .layout{display:grid;grid-template-columns:1fr 380px;grid-template-rows:auto 1fr auto;height:100vh}
+        .layout{display:grid;grid-template-columns:1fr 380px;grid-template-rows:auto 1fr auto;height:100vh}
         @media(max-width:768px){.layout{grid-template-columns:1fr}.side-panel{display:none}}
         .topbar{grid-column:1/-1;display:flex;align-items:center;gap:1rem;padding:.9rem 1.25rem;border-bottom:1px solid var(--line);background:rgba(13,11,10,.95);backdrop-filter:blur(12px);position:sticky;top:0;z-index:50}
         .back-btn{width:34px;height:34px;background:var(--surface);border:1px solid var(--line);border-radius:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--muted);font-size:.9rem;text-decoration:none;transition:all .2s;flex-shrink:0}
@@ -555,26 +535,29 @@ export default function CaseGroupPage() {
               <div style={{fontSize:'.7rem',fontWeight:700,letterSpacing:'.08em',textTransform:'uppercase',color:'var(--muted)',marginBottom:'.75rem'}}>
                 Members ({activeMembers.length})
               </div>
-              {activeMembers.map(m => (
-                <div key={m.id} className="member-row">
-                  <div className="member-avatar" style={{background: getColor(m.user_id)}}>
-                    {getInitials(m.profile?.first_name, m.profile?.last_name)}
+              {activeMembers.map(m => {
+                const p = getProfile(m);
+                return (
+                  <div key={m.id} className="member-row">
+                    <div className="member-avatar" style={{background: getColor(m.user_id)}}>
+                      {getInitials(p?.first_name, p?.last_name)}
+                    </div>
+                    <div className="member-name">
+                      {p?.first_name} {p?.last_name}
+                      {p?.points ? <span style={{fontSize:'.65rem',color:'#D4A31E',display:'block'}}>⭐ {p.points} pts</span> : null}
+                    </div>
+                    <span className={`member-role ${m.role}`}>{m.role}</span>
+                    {myRole === 'admin' && m.user_id !== me?.id && (
+                      <>
+                        <button className="member-reward-btn" title="Give reward"
+                          onClick={() => { setRewardTarget(m); setPanel('reward'); }}>🏆</button>
+                        <button className="member-block-btn" title="Remove from group"
+                          onClick={() => blockUser(m.id, m.user_id)}>🚫</button>
+                      </>
+                    )}
                   </div>
-                  <div className="member-name">
-                    {m.profile?.first_name} {m.profile?.last_name}
-                    {m.profile?.points ? <span style={{fontSize:'.65rem',color:'#D4A31E',display:'block'}}>⭐ {m.profile.points} pts</span> : null}
-                  </div>
-                  <span className={`member-role ${m.role}`}>{m.role}</span>
-                  {myRole === 'admin' && m.user_id !== me?.id && (
-                    <>
-                      <button className="member-reward-btn" title="Give reward"
-                        onClick={() => { setRewardTarget(m); setPanel('reward'); }}>🏆</button>
-                      <button className="member-block-btn" title="Remove from group"
-                        onClick={() => blockUser(m.id, m.user_id)}>🚫</button>
-                    </>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </aside>
         </div>
@@ -590,11 +573,14 @@ export default function CaseGroupPage() {
               <select value={rewardTarget?.user_id ?? ''}
                 onChange={e => setRewardTarget(activeMembers.find(m => m.user_id === e.target.value) || null)}>
                 <option value="">— Select a member —</option>
-                {activeMembers.filter(m => m.user_id !== me?.id).map(m => (
-                  <option key={m.user_id} value={m.user_id}>
-                    {m.profile?.first_name} {m.profile?.last_name}
-                  </option>
-                ))}
+                {activeMembers.filter(m => m.user_id !== me?.id).map(m => {
+                  const p = getProfile(m);
+                  return (
+                    <option key={m.user_id} value={m.user_id}>
+                      {p?.first_name} {p?.last_name}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <div className="modal-field">
@@ -605,7 +591,7 @@ export default function CaseGroupPage() {
             <div className="modal-field">
               <label>Thank you message (optional — auto-generated if left blank)</label>
               <textarea value={rewardMsg} onChange={e => setRewardMsg(e.target.value)}
-                placeholder={`Thank you ${rewardTarget?.profile?.first_name || '[member]'} for your valuable contribution...`}/>
+                placeholder={`Thank you ${getProfile(rewardTarget!)?.first_name || '[member]'} for your valuable contribution...`}/>
             </div>
             <div className="modal-btns">
               <button className="modal-btn secondary" onClick={() => { setPanel(null); setRewardTarget(null); }}>Cancel</button>
