@@ -474,7 +474,7 @@ export default function CaseGroupPage() {
           </div>
 
           <div className="input-bar">
-            {myRole === 'none' ? (
+            {(myRole as string) === 'none' ? (
               <div className="blocked-notice">You have been blocked from this group.</div>
             ) : isSolved ? (
               <div className="blocked-notice" style={{color:'var(--success)',background:'rgba(46,204,113,.1)'}}>
