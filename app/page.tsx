@@ -103,26 +103,32 @@ export default function Home() {
   setSuccess(true);
 }
 
-  async function handleLogin() {
+ async function handleLogin() {
   if (!email || !password) {
     alert('Please enter your email and password.');
     return;
   }
   setLoading(true);
- 
-  const { error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
- 
+
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
+
   if (error) {
     alert(error.message);
     setLoading(false);
     return;
   }
- 
-  // Redirect to dashboard after successful login
-  window.location.href = '/dashboard';
+
+  // Wait for session to be fully set before redirecting
+  const { data: { session } } = await supabase.auth.getSession();
+  
+  if (session) {
+    window.location.replace('/dashboard');
+  } else {
+    // Fallback: wait a moment then redirect
+    setTimeout(() => {
+      window.location.replace('/dashboard');
+    }, 500);
+  }
 }
 
   return (
